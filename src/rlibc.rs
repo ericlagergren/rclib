@@ -12,6 +12,8 @@ cfg_if! {
     }
 }
 
+pub use sys::Errno;
+
 /// See `exit(3)`.
 pub fn exit(status: c_int) {
     sys::exit(status);
