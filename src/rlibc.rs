@@ -1,4 +1,26 @@
+use core::ffi::{c_int, c_void};
+
+use cfg_if::cfg_if;
+
 use super::libc;
+
+cfg_if! {
+    if #[cfg(target_os = "freebsd")] {
+        use freebsd as sys;
+    } else {
+        compile_error!("unsupported operating system");
+    }
+}
+
+/// See `exit(3)`.
+pub fn exit(status: c_int) {
+    sys::exit(status);
+}
+
+/// See `write(2)`.
+pub fn write(filedes: c_int, buf: &[u8]) -> Result<usize, Errno> {
+    sys::write(filedes, buf.as_ptr(), buf.len())
+}
 
 #[cfg(test)]
 mod tests {
@@ -12,6 +34,6 @@ mod tests {
     fn test_write_basic() {
         let file = tempfile().unwrap();
         let fd = file.as_raw_fd();
-        write(fd, xxx, yyy)
+        write(fd, &[42u8]).unwrap();
     }
 }
