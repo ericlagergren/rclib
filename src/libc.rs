@@ -10,8 +10,6 @@ cfg_if! {
     }
 }
 
-fn e<T>(v: Result<T, sys::Errno>) -> T {}
-
 /// See `exit(3)`.
 #[no_mangle]
 pub extern "C" fn exit(status: c_int) {
