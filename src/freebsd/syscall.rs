@@ -10,23 +10,32 @@ pub type Errno = i64;
 
 macro_rules! syscall {
     ($trap:expr, $arg1:expr) => {
-        $crate::freebsd::syscall::syscall3(
-            $trap,
-            $arg1.into(),
-            $crate::sc::Arg::none(),
-            $crate::sc::Arg::none(),
-        )
+        // SAFETY: TODO
+        unsafe {
+            $crate::freebsd::syscall::syscall3(
+                $trap,
+                $arg1.into(),
+                $crate::sc::Arg::none(),
+                $crate::sc::Arg::none(),
+            )
+        }
     };
     ($trap:expr, $arg1:expr, $arg2:expr) => {
-        $crate::freebsd::syscall::syscall3(
-            $trap,
-            $arg1.into(),
-            $arg2.into(),
-            $crate::sc::Arg::none(),
-        )
+        // SAFETY: TODO
+        unsafe {
+            $crate::freebsd::syscall::syscall3(
+                $trap,
+                $arg1.into(),
+                $arg2.into(),
+                $crate::sc::Arg::none(),
+            )
+        }
     };
     ($trap:expr, $arg1:expr, $arg2:expr, $arg3:expr) => {
-        $crate::freebsd::syscall::syscall3($trap, $arg1.into(), $arg2.into(), $arg3.into())
+        // SAFETY: TODO
+        unsafe {
+            $crate::freebsd::syscall::syscall3($trap, $arg1.into(), $arg2.into(), $arg3.into())
+        }
     };
 }
 pub(crate) use syscall;
