@@ -19,7 +19,7 @@ pub fn exit(status: c_int) {
 
 /// See `write(2)`.
 pub fn write(filedes: c_int, buf: &[u8]) -> Result<usize, Errno> {
-    sys::write(filedes, buf.as_ptr(), buf.len())
+    sys::write(filedes, buf.as_ptr().cast(), buf.len())
 }
 
 #[cfg(test)]
