@@ -4,7 +4,9 @@ use core::{
 };
 
 use super::sysnum::*;
-use crate::sc::{Arg, Errno};
+use crate::sc::Arg;
+
+pub type Errno = i64;
 
 macro_rules! syscall {
     ($trap:expr, $arg1:expr) => {

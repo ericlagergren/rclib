@@ -38,5 +38,3 @@ impl<T> From<*const T> for Arg {
         Self(v.cast::<c_void>().cast_mut())
     }
 }
-
-pub type Errno = i64;

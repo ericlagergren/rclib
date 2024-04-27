@@ -1,6 +1,10 @@
 use core::ffi::{c_int, c_void};
 
-use super::{syscall::syscall, sysnum::*};
+pub use super::syscall::Errno;
+use super::{
+    syscall::syscall,
+    sysnum::{SYS_EXIT, SYS_WRITE},
+};
 
 pub fn exit(status: c_int) {
     let _ = syscall!(SYS_EXIT, status);
