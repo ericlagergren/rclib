@@ -1,12 +1,14 @@
-use core::arch::asm;
-use core::ffi::{c_int, c_void};
+use core::{
+    arch::asm,
+    ffi::{c_int, c_void},
+};
 
 use super::sysnum::*;
 use crate::sc::{Arg, Errno};
 
 macro_rules! syscall {
     ($trap:expr, $arg1:expr) => {
-        $crate::freebsd::syscall3(
+        $crate::freebsd::syscall::syscall3(
             $trap,
             $arg1.into(),
             $crate::sc::Arg::none(),
@@ -14,10 +16,15 @@ macro_rules! syscall {
         )
     };
     ($trap:expr, $arg1:expr, $arg2:expr) => {
-        $crate::freebsd::syscall3($trap, $arg1.into(), $arg2.into(), $crate::sc::Arg::none())
+        $crate::freebsd::syscall::syscall3(
+            $trap,
+            $arg1.into(),
+            $arg2.into(),
+            $crate::sc::Arg::none(),
+        )
     };
     ($trap:expr, $arg1:expr, $arg2:expr, $arg3:expr) => {
-        $crate::freebsd::syscall3($trap, $arg1.into(), $arg2.into(), $arg3.into())
+        $crate::freebsd::syscall::syscall3($trap, $arg1.into(), $arg2.into(), $arg3.into())
     };
 }
 pub(crate) use syscall;
