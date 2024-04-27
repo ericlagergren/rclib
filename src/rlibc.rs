@@ -2,11 +2,9 @@ use core::ffi::{c_int, c_void};
 
 use cfg_if::cfg_if;
 
-use super::libc;
-
 cfg_if! {
     if #[cfg(target_os = "freebsd")] {
-        use freebsd as sys;
+        use super::freebsd as sys;
     } else {
         compile_error!("unsupported operating system");
     }
