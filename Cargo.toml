@@ -1,18 +1,5 @@
-[package]
-name = "rclib"
-version = "0.1.0"
-edition = "2021"
-description = """
-  TODO
-"""
-license = "BSD-3-Clause"
-readme = "README.md"
-repository = "https://github.com/ericlagergren/rclib"
-keywords = [ "libc", "syscall" ]
-categories = [ "no-std", "no-std::no-alloc" ]
-
-[dependencies]
-cfg-if = { version = "1.0.0", default-features = false }
-
-[dev-dependencies]
-tempfile = { version = "3.10.1" }
+[workspace]
+resolver = "2"
+members = [
+	"crates/*"
+]
