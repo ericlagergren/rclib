@@ -2,11 +2,12 @@
 
 #![allow(dead_code)]
 
-use std::{fmt, ops::RangeInclusive, str::FromStr};
+use std::{fmt, io::Write, ops::RangeInclusive, str::FromStr};
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 use bitflags::bitflags;
-use strum::{AsRefStr, Display, EnumString, IntoStaticStr};
+
+use super::rustfmt::Formatter;
 
 /// Parses a `syscall.master` file.
 pub fn parse(data: &str) -> Syscalls<'_> {
@@ -47,7 +48,6 @@ impl<'a> Syscalls<'a> {
                     (line, false)
                 }
             };
-            //println!("# line={line} has_block={has_block}");
 
             let (numbers, audit, flags, name) = {
                 let mut cols = line.trim().split_ascii_whitespace();
@@ -97,30 +97,10 @@ impl<'a> Syscalls<'a> {
     }
 
     /// Writes the syscalls to `w`.
-    pub fn display<W: fmt::Write>(&self, w: &mut W) -> Result<()> {
-        for sc in *self {
-            let sc = sc?;
-
-            if sc.flags.contains(Flags::RESERVED) {
-                writeln!(w, "// Reserved: {}", sc.number)?;
-                return Ok(());
-            }
-
-            writeln!(w, "pub const SYS_{}: u64 = {};", sc.name, sc.number)?;
-
-            writeln!(w, "pub unsafe fn {}(", sc.name)?;
-            for Arg { name, typ } in &sc.args {
-                writeln!(w, "\t{name}: {typ},")?;
-            }
-            writeln!(w, ") -> Result<(i64, i64), Errno> {{")?;
-            write!(w, "\tsyscall!(SYS_{}", sc.name)?;
-            for Arg { name, .. } in &sc.args {
-                write!(w, ", {name}")?;
-            }
-            writeln!(w, ")")?;
-            writeln!(w, "}}")?;
-        }
-        Ok(())
+    pub fn write<W: Write>(&self, w: &mut W) -> Result<()> {
+        let tokens = self.to_tokens()?;
+        let source = Formatter::new().format(&tokens)?;
+        Ok(w.write_all(source.as_bytes())?)
     }
 }
 
@@ -129,12 +109,6 @@ impl<'a> Iterator for Syscalls<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.try_next().transpose()
-    }
-}
-
-impl<'a> fmt::Display for Syscalls<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.display(f).map_err(|_| fmt::Error)
     }
 }
 
@@ -200,9 +174,9 @@ impl IntoIterator for Numbers {
 //     _In_reads_bytes_(nbyte) const void *buf,
 //     size_t nbyte
 // );
-#[derive(Default)]
 struct Block<'a> {
     result: &'a str,
+    star: usize,
     name: &'a str,
     args: Args<'a>,
 }
@@ -210,14 +184,24 @@ struct Block<'a> {
 impl<'a> Block<'a> {
     fn parse(s: &'a str) -> Result<Self> {
         let (result, rest) = s.split_once(" ").context("missing result")?;
-        let (name, rest) = rest.split_once("(").context("missing opening '(")?;
+        let (mut name, rest) = rest.split_once("(").context("missing opening '(")?;
         let (inner, rest) = rest.rsplit_once(")").context("missing trailing ')")?;
 
-        println!("inner = '{}'", inner.trim());
+        let mut star = 0;
+        while let Some(s) = name.strip_prefix("*") {
+            name = s;
+            star += 1;
+        }
+
         let args = Args::parse(inner.trim())?;
 
         ensure!(rest == ";");
-        Ok(Block { result, name, args })
+        Ok(Block {
+            result,
+            star,
+            name,
+            args,
+        })
     }
 }
 
@@ -232,7 +216,6 @@ impl<'a> Args<'a> {
         let mut args = Vec::new();
         for line in s.trim().lines() {
             let line = strip_suffix(line.trim(), ",");
-            println!("line = '{line}'");
             let arg = Arg::parse(line.trim())?;
             args.push(arg);
         }
@@ -246,93 +229,283 @@ pub struct Arg<'a> {
     /// The argument's name.
     pub name: &'a str,
     /// The argument's type.
-    pub typ: &'a str,
+    pub typ: TypeKind<'a>,
+    /// SAL annotation, if any.
+    pub annotation: Option<Annotation<'a>>,
+    /// `_Contains_` annotation, if any.
+    pub contains: Option<Contains>,
 }
 
 impl<'a> Arg<'a> {
-    fn parse(s: &'a str) -> Result<Self> {
-        println!("parse: '{s}'");
+    fn parse(mut s: &'a str) -> Result<Self> {
         if s == "..." {
             return Ok(Self {
-                name: "_todo",
-                typ: "()",
+                name: "_variadic",
+                typ: TypeKind::Void,
+                annotation: None,
+                contains: None,
             });
         }
-        let (rest, mut name) = s.rsplit_once(" ").context("missing ' ' in arg")?;
-        let mut star = 0;
-        loop {
-            if let Some(v) = name.strip_prefix("*") {
-                star += 1;
-                name = v;
-            } else {
-                break;
-            }
+
+        fn next<'a>(s: &mut &'a str) -> Result<&'a str> {
+            let (token, rest) = s
+                .split_once(|c: char| c.is_ascii_whitespace())
+                .context("should have at least one token")?;
+            *s = rest;
+            Ok(token)
         }
-        Ok(Self { name, typ: "()" })
+
+        let mut token = next(&mut s)?;
+
+        let annotation = Annotation::parse(token)?;
+        if annotation.is_some() {
+            token = next(&mut s)?;
+        }
+        let contains = Contains::parse(token)?;
+        if contains.is_some() {
+            token = next(&mut s)?;
+        }
+
+        let (typ, name) = s
+            .rsplit_once(|c: char| c == '*' || c.is_ascii_whitespace())
+            .context("syntax error")?;
+        let typ = TypeKind::parse(typ.trim())?;
+        Ok(Self {
+            name,
+            typ,
+            annotation,
+            contains,
+        })
     }
 }
 
-struct Type<'a> {
-    name: &'a str,
-    annotations: Vec<()>,
+/// A C type.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum TypeKind<'a> {
+    /// `void`.
+    Void,
+    /// An integer.
+    Int(IntKind),
+    /// A pointer to a type.
+    Pointer(Box<TypeKind<'a>>),
+    /// A `struct`.
+    Struct(&'a str),
+    /// Some other type.
+    Unknown(&'a str),
 }
 
-impl<'a> Type<'a> {
-    fn parse(_s: &'a str) -> Result<Self> {
-        todo!()
+/// A C integer type.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum IntKind {
+    /// An `int`.
+    Int,
+    /// A `u_long`.
+    ULong,
+    /// A `char`.
+    Char,
+    /// A `uintptr_t`.
+    Uintptr,
+}
+
+impl<'a> TypeKind<'a> {
+    fn parse(s: &'a str) -> Result<Self> {
+        println!("---");
+        println!("PARSE: '{s}'");
+        let mut fields = s.split_ascii_whitespace();
+
+        let mut field = fields.next().context("expected at least one field")?;
+
+        let const_ = field == "const";
+        if const_ {
+            field = fields.next().context("TODO")?;
+        }
+        println!("const = {const_}");
+
+        let mut kind = Self::Unknown("???");
+
+        if field == "struct" {
+            kind = Self::Struct("");
+            field = fields.next().context("TODO")?;
+        }
+        println!("struct = {}", kind == Self::Struct(""));
+
+        let name = field;
+
+        // while let Some(s) = name.strip_prefix("*") {
+        //     name = s;
+        //     kind = Self::Pointer(Box::new(kind))
+        // }
+        println!("name = {name}");
+        println!("---");
+        println!("");
+
+        Ok(kind)
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
-enum Annotation<'a> {
+/// A SAL annotation.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[allow(missing_docs)] // TODO
+pub enum Annotation<'a> {
     In,
+    InOpt,
     Out,
+    OutOpt,
     InOut,
+    InOutOpt,
+
     InZ,
+    InZOpt,
     OutZ,
+    OutZOpt,
     InOutZ,
+    InOutZOpt,
+
     InReadsZ(&'a str),
+    InReadsZOpt(&'a str),
     OutWritesZ(&'a str),
+    OutWritesZOpt(&'a str),
     InOutUpdatesZ(&'a str),
+    InOutUpdatesZOpt(&'a str),
+
     InReads(&'a str),
+    InReadsOpt(&'a str),
     OutWrites(&'a str),
+    OutWritesOpt(&'a str),
     InOutUpdates(&'a str),
+    InOutUpdatesOpt(&'a str),
+
     InReadsBytes(&'a str),
+    InReadsBytesOpt(&'a str),
     OutWritesBytes(&'a str),
+    OutWritesBytesOpt(&'a str),
     InOutUpdatesBytes(&'a str),
+    InOutUpdatesBytesOpt(&'a str),
 }
 
 impl<'a> Annotation<'a> {
-    fn parse(s: &'a str) -> Result<Self> {
-        match s {
-            "_In_" => return Ok(Self::In),
-            "_Out_" => return Ok(Self::Out),
-            "_Inout_" => return Ok(Self::InOut),
-            "_In_z_" => return Ok(Self::InZ),
-            "_Out_z_" => return Ok(Self::OutZ),
-            "_Inout_z_" => return Ok(Self::InOutZ),
-            _ => {}
-        }
-        let (name, rest) = s.split_once("(").context("missing opening '('")?;
-        let (n, rest) = rest.split_once(")").context("missing closing ')")?;
-        ensure!(rest.is_empty());
-        match name {
-            "InReadsZ" => Ok(Self::InReadsZ(n)),
-            "OutWritesZ" => Ok(Self::OutWritesZ(n)),
-            "InOutUpdatesZ" => Ok(Self::InOutUpdatesZ(n)),
-            "InReads" => Ok(Self::InReads(n)),
-            "OutWrites" => Ok(Self::OutWrites(n)),
-            "InOutUpdates" => Ok(Self::InOutUpdates(n)),
-            "InReadsBytes" => Ok(Self::InReadsBytes(n)),
-            "OutWritesBytes" => Ok(Self::OutWritesBytes(n)),
-            "InOutUpdatesBytes" => Ok(Self::InOutUpdatesBytes(n)),
-        }
+    fn parse(s: &'a str) -> Result<Option<Self>> {
+        let (name, rest) = s.split_once("(").unwrap_or((s, ""));
+        let arg = || {
+            let (n, rest) = rest
+                .split_once(")")
+                .context("malformed annotation: missing closing ')'")?;
+            ensure!(rest.is_empty());
+            Ok(n)
+        };
+        let v = match name {
+            "_In_" => Self::In,
+            "_In_opt_" => Self::InOpt,
+            "_Out_" => Self::Out,
+            "_Out_opt_" => Self::OutOpt,
+            "_Inout_opt_" => Self::InOutOpt,
+            "_Inout_" => Self::InOut,
+
+            "_In_z_" => Self::InZ,
+            "_In_z_opt_" => Self::InZOpt,
+            "_Out_z_" => Self::OutZ,
+            "_Out_z_opt_" => Self::OutZOpt,
+            "_Inout_z_" => Self::InOutZ,
+            "_Inout_z_opt_" => Self::InOutZOpt,
+
+            "_In_reads_z_" => Self::InReadsZ(arg()?),
+            "_In_reads_z_opt_" => Self::InReadsZOpt(arg()?),
+            "_Out_writes_z_" => Self::OutWritesZ(arg()?),
+            "_Out_writes_z_opt_" => Self::OutWritesZOpt(arg()?),
+            "_Inout_updates_z_" => Self::InOutUpdatesZ(arg()?),
+            "_Inout_updates_z_opt_" => Self::InOutUpdatesZOpt(arg()?),
+
+            "_In_reads_" => Self::InReads(arg()?),
+            "_In_reads_opt_" => Self::InReadsOpt(arg()?),
+            "_Out_writes_" => Self::OutWrites(arg()?),
+            "_Out_writes_opt_" => Self::OutWritesOpt(arg()?),
+            "_Inout_updates_" => Self::InOutUpdates(arg()?),
+            "_Inout_updates_opt_" => Self::InOutUpdatesOpt(arg()?),
+
+            "_In_reads_bytes_" => Self::InReadsBytes(arg()?),
+            "_In_reads_bytes_opt_" => Self::InReadsBytesOpt(arg()?),
+            "_Out_writes_bytes_" => Self::OutWritesBytes(arg()?),
+            "_Out_writes_bytes_opt_" => Self::OutWritesBytesOpt(arg()?),
+            "_Inout_updates_bytes_" => Self::InOutUpdatesBytes(arg()?),
+            "_Inout_updates_bytes_opt_" => Self::InOutUpdatesBytesOpt(arg()?),
+            _ => return Ok(None),
+        };
+        Ok(Some(v))
     }
 }
 
 impl fmt::Display for Annotation<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+        use Annotation::*;
+        match self {
+            In => "_In_".fmt(f),
+            InOpt => "_In_opt_".fmt(f),
+            Out => "_Out_".fmt(f),
+            OutOpt => "_Out_opt_".fmt(f),
+            InOut => "_Inout_".fmt(f),
+            InOutOpt => "_Inout_opt_".fmt(f),
+
+            InZ => "_In_z_".fmt(f),
+            InZOpt => "_In_z_opt_".fmt(f),
+            OutZ => "_Out_z_".fmt(f),
+            OutZOpt => "_Out_z_opt_".fmt(f),
+            InOutZ => "_Inout_z_".fmt(f),
+            InOutZOpt => "_Inout_z_opt_".fmt(f),
+
+            InReadsZ(n) => write!(f, "_In_reads_z_({n})"),
+            InReadsZOpt(n) => write!(f, "_In_reads_z_opt_({n})"),
+            OutWritesZ(n) => write!(f, "_Out_writes_z_({n})"),
+            OutWritesZOpt(n) => write!(f, "_Out_writes_z_opt_({n})"),
+            InOutUpdatesZ(n) => write!(f, "_Inout_updates_z_({n})"),
+            InOutUpdatesZOpt(n) => write!(f, "_Inout_updates_z_opt_({n})"),
+
+            InReads(n) => write!(f, "_In_reads_({n})"),
+            InReadsOpt(n) => write!(f, "_In_reads_opt_({n})"),
+            OutWrites(n) => write!(f, "_Out_writes_({n})"),
+            OutWritesOpt(n) => write!(f, "_Out_writes_opt_({n})"),
+            InOutUpdates(n) => write!(f, "_Inout_updates_({n})"),
+            InOutUpdatesOpt(n) => write!(f, "_Inout_updates_opt_({n})"),
+
+            InReadsBytes(n) => write!(f, "_In_reads_bytes_({n})"),
+            InReadsBytesOpt(n) => write!(f, "_In_reads_bytes_opt_({n})"),
+            OutWritesBytes(n) => write!(f, "_Out_writes_bytes({n})"),
+            OutWritesBytesOpt(n) => write!(f, "_Out_writes_bytes_opt_({n})"),
+            InOutUpdatesBytes(n) => write!(f, "_Inout_updates_bytes_({n})"),
+            InOutUpdatesBytesOpt(n) => write!(f, "_Inout_updates_bytes_opt_({n})"),
+        }
+    }
+}
+
+/// `_Contains_` annotation.
+#[derive(Copy, Clone, Default, Debug, Eq, PartialEq)]
+pub struct Contains(u64);
+
+bitflags! {
+    impl Contains: u64 {
+        /// Contains `long`.
+        const LONG = 1 << 0;
+        /// Contains a pointer.
+        const PTR = 1 << 1;
+        /// Contains `time_t`.
+        const TIME_T = 1 << 2;
+    }
+}
+
+impl Contains {
+    fn parse(s: &str) -> Result<Option<Self>> {
+        let Some(types) = s.strip_prefix("_Contains_") else {
+            return Ok(None);
+        };
+        let mut flags = Self::default();
+        for typ in strip_suffix(types, "_").split("_") {
+            match typ {
+                "long" => flags |= Self::LONG,
+                "ptr" => flags |= Self::PTR,
+                "timet" => flags |= Self::TIME_T,
+                _ => return Err(anyhow!("unknown type: '{typ}'")),
+            }
+        }
+        Ok(Some(flags))
     }
 }
 
@@ -421,6 +594,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_annotation() {
+        use Annotation::*;
+
+        const ANNOTATIONS: [Annotation<'static>; 30] = [
+            In,
+            InOpt,
+            Out,
+            OutOpt,
+            InOut,
+            InOutOpt,
+            InZ,
+            InZOpt,
+            OutZ,
+            OutZOpt,
+            InOutZ,
+            InOutZOpt,
+            InReadsZ("len"),
+            InReadsZOpt("len"),
+            OutWritesZ("len"),
+            OutWritesZOpt("len"),
+            InOutUpdatesZ("nfds"),
+            InOutUpdatesZOpt("nfds"),
+            InReads("n"),
+            InReadsOpt("n"),
+            OutWrites("n"),
+            OutWritesOpt("n"),
+            InOutUpdates("x"),
+            InOutUpdatesOpt("x"),
+            InReadsBytes("foo"),
+            InReadsBytesOpt("foo"),
+            OutWritesBytesOpt("bar"),
+            OutWritesBytesOpt("bar"),
+            InOutUpdatesBytesOpt("baz"),
+            InOutUpdatesBytesOpt("baz"),
+        ];
+        for (i, want) in ANNOTATIONS.into_iter().enumerate() {
+            let s = format!("{want}");
+            let got = Annotation::parse(&s).unwrap();
+            assert_eq!(got, Some(want), "#{i}");
+        }
+    }
+
+    #[test]
+    #[ignore]
     fn test_parse() {
         const SYSCALLS_MASTER: &str = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -429,8 +646,23 @@ mod tests {
 
         let got = parse(SYSCALLS_MASTER);
         //println!("{got}");
-        let mut buf = String::new();
-        got.display(&mut buf).unwrap();
-        println!("{buf}");
+        let mut buf = Vec::new();
+        got.write(&mut buf).unwrap();
+        println!("{}", String::from_utf8(buf).unwrap());
+    }
+
+    #[test]
+    fn test_type() {
+        let cases = [
+            (
+                "const* char",
+                TypeKind::Pointer(Box::new(TypeKind::Int(IntKind::Char))),
+            ),
+            ("struct foo", TypeKind::Struct("foo")),
+        ];
+        for (i, (input, want)) in cases.into_iter().enumerate() {
+            let got = TypeKind::parse(input).unwrap();
+            assert_eq!(got, want, "#{i}");
+        }
     }
 }

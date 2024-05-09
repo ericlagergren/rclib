@@ -24,5 +24,6 @@
     unused_qualifications
 )]
 
-pub mod gen;
+mod gen;
 pub mod parse;
+mod rustfmt;
